@@ -2,7 +2,7 @@
   "name": "inline-watch-expressions",
   "displayName": "inline-watch-expressions",
   "description": "Add watch expressions to the code",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "engines": {
     "vscode": "^1.72.0"
   },
@@ -12,6 +12,22 @@
   "activationEvents": [
     "onDebug"
   ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "inline-watch-expressions.add-inline-watch-expression-decorator",
+        "title": "Add inline watch expression decorator to the selected text"
+      },
+      {
+        "command": "inline-watch-expressions.remove-inline-watch-expression-decorator",
+        "title": "Remove inline watch expression decorator from the selected text"
+      },
+      {
+        "command": "inline-watch-expressions.reset-inline-watch-expression-decorators",
+        "title": "Reset added inline watch expression decorators"
+      }
+    ]
+  },
   "main": "./out/extension.js",
   "scripts": {
     "vscode:prepublish": "npm run compile",

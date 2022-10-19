@@ -6,8 +6,8 @@ import { Disposable } from '@hediet/std/disposable';
 
 type WatchedValue = {
   expression: string;
-  seq: number;
   value?: { type: string; result: string };
+  renderAt: vscode.Range[];
 };
 
 if (process.env.NODE_ENV === 'development') {
@@ -39,27 +39,43 @@ interface ExpressionLocation {
   expression: string;
   /** Current Value of expression */
   value: any;
-  /** RegExp match */
-  match: RegExpExecArray;
+  text: string;
+  start: vscode.Position;
 }
 
 /**
  * Return {@link ExpressionLocation expression locations} within the provided {@link document}.
  */
 function* getExpressionLocations(
-  haystack: string,
-  expressions: Iterable<[string, any]>,
+  document: vscode.TextDocument,
+  expressions: Iterable<[string, WatchedValue]>,
 ): Generator<ExpressionLocation> {
-  for (const [expression, value] of expressions) {
-    // Must begin with a whitespace or word border, and end with whitespace, word border, or one of []()`
-    const regex = new RegExp('(\\s|\\b)' + escapeRegExp(expression) + '(\\s|\\b|\[|\]|\(|\)|`)', 'gm');
-    let match;
-    while ((match = regex.exec(haystack))) {
-      yield {
-        expression,
-        value,
-        match,
-      };
+  const haystack = document.getText();
+
+  for (const [expression, watch] of expressions) {
+    const value = watch.value!.result;
+
+    if (watch.renderAt.length) {
+      for (const range of watch.renderAt) {
+        yield {
+          expression,
+          value,
+          text: expression,
+          start: range.start,
+        };
+      }
+    } else {
+      // Must begin with a whitespace or word border, and end with whitespace, word border, or one of []()
+      const regex = new RegExp('(\\s|\\b)' + escapeRegExp(expression) + '(\\s|\\b|[|]|(|))', 'gm');
+      let match;
+      while ((match = regex.exec(haystack))) {
+        yield {
+          expression,
+          value,
+          text: match[0],
+          start: document.positionAt(match.index),
+        };
+      }
     }
   }
 }
@@ -67,16 +83,18 @@ function* getExpressionLocations(
 /**
  * Generate decorators on the {@link document} from the provided {@link expressionLocations expression locations}.
  */
-function generateDecorators(document: vscode.TextDocument, expressionLocations: ExpressionLocation[]) {
+function generateDecorators(
+  document: vscode.TextDocument,
+  expressionLocations: ExpressionLocation[],
+): vscode.DecorationOptions[] {
   return expressionLocations
     .sort((a, b) => a.expression.length - b.expression.length)
-    .map(({ match, value }) => {
-      const start = document.positionAt(match.index);
-      const end = document.positionAt(match.index + match[0].length);
+    .map(({ text, start, value }) => {
+      const end = document.positionAt(document.offsetAt(start) + text.length);
 
       // Move start/end range to exclude whitespace
-      const prefixOffset = match[0].trimStart() !== match[0] ? match[0].length - match[0].trimStart().length : 0;
-      const suffixOffset = match[0].trimEnd() !== match[0] ? match[0].length - match[0].trimEnd().length : 0;
+      const prefixOffset = text.trimStart() !== text ? text.length - text.trimStart().length : 0;
+      const suffixOffset = text.trimEnd() !== text ? text.length - text.trimEnd().length : 0;
 
       // Roll end position to previous line if character is negative
       const [endLine, endChar] =
@@ -96,7 +114,7 @@ function generateDecorators(document: vscode.TextDocument, expressionLocations: 
             fontStyle: 'italic',
           },
           after: {
-            contentText: ` === ${value})`,
+            contentText: ` = ${value})`,
             color: 'grey',
             fontStyle: 'italic',
           },
@@ -123,6 +141,64 @@ class Extension implements vscode.DebugAdapterTracker {
         createDebugAdapterTracker: () => this,
       }),
     );
+
+    this.dispose.track(
+      vscode.commands.registerTextEditorCommand(
+        'inline-watch-expressions.add-inline-watch-expression-decorator',
+        async editor => {
+          const expression = editor.document.getText(editor.selection);
+          if (!expression) {
+            return vscode.window.showInformationMessage('No expression selected');
+          }
+
+          const existingWatch = this.expression.value.get(expression);
+          if (existingWatch) {
+            existingWatch.renderAt = [
+              ...existingWatch.renderAt.filter(range => !range.intersection(editor.selection)),
+              editor.selection,
+            ];
+          } else {
+            this.expression.value.set(expression, {
+              expression,
+              renderAt: [editor.selection],
+            });
+            await vscode.commands.executeCommand('editor.debug.action.selectionToWatch');
+          }
+
+          this.queueDecoratorUpdate();
+
+          return vscode.window.showInformationMessage(existingWatch ? 'Updated watch' : 'Added watch');
+        },
+      ),
+    );
+
+    this.dispose.track(
+      vscode.commands.registerTextEditorCommand(
+        'inline-watch-expressions.remove-inline-watch-expression-decorator',
+        async editor => {
+          const expression = editor.document.getText(editor.selection);
+          if (!expression) {
+            return vscode.window.showInformationMessage('No expression selected');
+          }
+
+          const existingWatch = this.expression.value.get(expression);
+          if (existingWatch) {
+            existingWatch.renderAt = existingWatch.renderAt.filter(range => !range.intersection(editor.selection));
+
+            this.queueDecoratorUpdate();
+          }
+
+          return vscode.window.showInformationMessage(existingWatch ? 'Removed watch' : 'No watch found');
+        },
+      ),
+    );
+
+    this.dispose.track(
+      vscode.commands.registerCommand('inline-watch-expressions.reset-inline-watch-expression-decorators', () => {
+        this.clearExpressions();
+        return vscode.window.showInformationMessage('Removed all watches');
+      }),
+    );
   }
 
   queueDecoratorUpdate = debounce(this.updateDecorators.bind(this), 500);
@@ -139,11 +215,9 @@ class Extension implements vscode.DebugAdapterTracker {
       this.decorationType,
       generateDecorators(editor.document, [
         ...getExpressionLocations(
-          editor.document.getText(),
+          editor.document,
           // Filter out all expressions that don't have a value
-          [...this.expression.value.entries()]
-            .filter(([_, watch]) => watch.value?.result)
-            .map(([expression, watch]) => [expression, watch.value!.result]),
+          [...this.expression.value.entries()].filter(([_, watch]) => watch.value?.result),
         ),
       ]),
     );
@@ -152,6 +226,7 @@ class Extension implements vscode.DebugAdapterTracker {
   clearExpressions() {
     this.expression.value.clear();
     this.expression.request.clear();
+    this.queueDecoratorUpdate();
   }
 
   onWillStartSession = this.clearExpressions;
@@ -175,13 +250,20 @@ class Extension implements vscode.DebugAdapterTracker {
       this.clearExpressions();
       // If evaluation request is made via the watch window, add watch object to expression maps
     } else if (message.command === 'evaluate' && message.type === 'request' && message.arguments.context === 'watch') {
-      const obj = {
-        seq: message.seq,
-        expression: message.arguments.expression,
-        value: undefined,
-      };
-      this.expression.value.set(message.arguments.expression, obj);
-      this.expression.request.set(message.seq, obj);
+      const expression = message.arguments.expression;
+
+      const existingWatch = this.expression.value.get(expression);
+      if (existingWatch) {
+        this.expression.request.set(message.seq, existingWatch!);
+      } else {
+        const newWatch = {
+          expression,
+          value: undefined,
+          renderAt: [],
+        };
+        this.expression.value.set(expression, newWatch);
+        this.expression.request.set(message.seq, newWatch);
+      }
     }
   }
 }
