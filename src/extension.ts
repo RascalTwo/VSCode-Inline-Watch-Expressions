@@ -250,7 +250,7 @@ class Extension implements vscode.DebugAdapterTracker {
     if (
       message.type === 'response' &&
       message.command === 'evaluate' &&
-      !message.body.error &&
+      message.success &&
       this.expression.request.has(message.request_seq)
     ) {
       this.expression.request.get(message.request_seq)!.value = message.body;
