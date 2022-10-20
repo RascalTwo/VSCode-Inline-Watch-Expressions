@@ -135,6 +135,7 @@ class Extension implements vscode.DebugAdapterTracker {
     value: new Map(),
     request: new Map(),
   };
+  private renderAt: Map<string, vscode.Range[]> = new Map();
   constructor() {
     this.dispose.track(
       vscode.debug.registerDebugAdapterTrackerFactory('*', {
@@ -160,10 +161,12 @@ class Extension implements vscode.DebugAdapterTracker {
           } else {
             this.expression.value.set(expression, {
               expression,
-              renderAt: [editor.selection],
+              renderAt: [...(this.renderAt.get(expression) || []), editor.selection],
             });
             await vscode.commands.executeCommand('editor.debug.action.selectionToWatch');
           }
+
+          this.renderAt.set(expression, [...(this.renderAt.get(expression) || []), editor.selection]);
 
           this.queueDecoratorUpdate();
 
@@ -188,6 +191,13 @@ class Extension implements vscode.DebugAdapterTracker {
             this.queueDecoratorUpdate();
           }
 
+          if (this.renderAt.has(expression)) {
+            this.renderAt.set(
+              expression,
+              this.renderAt.get(expression)!.filter(range => !range.intersection(editor.selection)),
+            );
+          }
+
           return vscode.window.showInformationMessage(existingWatch ? 'Removed watch' : 'No watch found');
         },
       ),
@@ -195,7 +205,7 @@ class Extension implements vscode.DebugAdapterTracker {
 
     this.dispose.track(
       vscode.commands.registerCommand('inline-watch-expressions.reset-inline-watch-expression-decorators', () => {
-        this.clearExpressions();
+        this.clearExpressions(true);
         return vscode.window.showInformationMessage('Removed all watches');
       }),
     );
@@ -223,9 +233,12 @@ class Extension implements vscode.DebugAdapterTracker {
     );
   }
 
-  clearExpressions() {
+  clearExpressions(clearRenderAts = false) {
     this.expression.value.clear();
     this.expression.request.clear();
+    if (clearRenderAts) {
+      this.renderAt.clear();
+    }
     this.queueDecoratorUpdate();
   }
 
@@ -259,7 +272,7 @@ class Extension implements vscode.DebugAdapterTracker {
         const newWatch = {
           expression,
           value: undefined,
-          renderAt: [],
+          renderAt: this.renderAt.get(expression) || [],
         };
         this.expression.value.set(expression, newWatch);
         this.expression.request.set(message.seq, newWatch);
